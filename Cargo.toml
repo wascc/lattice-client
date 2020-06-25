@@ -1,0 +1,27 @@
+[package]
+name = "latticeclient"
+version = "0.0.1"
+authors = ["Kevin Hoffman <alothien@gmail.com>"]
+edition = "2018"
+homepage = "https://wascc.dev"
+repository = "https://github.com/wascc/latticectl"
+description = "A command-line utility for interacting with a waSCC lattice"
+license = "Apache-2.0"
+documentation = "https://docs.rs/latticectl"
+readme = "README.md"
+keywords = ["webassembly", "wasm", "lattice", "wascc", "wapc"]
+categories = ["wasm", "api-bindings","command-line-utilities"]
+
+
+[dependencies]
+structopt = "0.3.15"
+nats = "0.5.0"
+serde = { version = "1.0.114", features = ["derive"]}
+wascc-codec = "0.7.1"
+wascap = "0.4.7"
+log = "0.4.8"
+serde_json = "1.0.55"
+
+[[bin]]
+name = "latticectl"
+path = "src/main.rs"
