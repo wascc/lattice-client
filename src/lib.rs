@@ -167,9 +167,9 @@ impl Client {
 
 fn get_connection(host: &str, credsfile: Option<PathBuf>) -> nats::Connection {
     let mut opts = if let Some(creds) = credsfile {
-        nats::ConnectionOptions::with_credentials(creds)
+        nats::Options::with_credentials(creds)
     } else {
-        nats::ConnectionOptions::new()
+        nats::Options::new()
     };
     opts = opts.with_name("waSCC Lattice");
     opts.connect(host).unwrap()
