@@ -55,9 +55,13 @@ struct Cli {
         long = "timeout",
         env = "LATTICE_RPC_TIMEOUT_MILLIS",
         hide_env_values = true,
-        default_value = "500"
+        default_value = "600"
     )]
     call_timeout: u64,
+
+    /// Render the output in JSON
+    #[structopt(short, long)]
+    json: bool,
 }
 
 #[derive(Debug, Clone, StructOpt)]
@@ -78,6 +82,7 @@ fn main() {
         match handle_command(
             cmd,
             args.url,
+            args.json,
             args.creds,
             Duration::from_millis(args.call_timeout),
         ) {
@@ -93,11 +98,12 @@ fn main() {
 fn handle_command(
     cmd: CliCommand,
     url: String,
+    json: bool,
     creds: Option<PathBuf>,
     timeout: Duration,
 ) -> Result<(), Box<dyn ::std::error::Error>> {
     match cmd {
-        CliCommand::List { entity_type } => list_entities(&entity_type, &url, creds, timeout),
+        CliCommand::List { entity_type } => list_entities(&entity_type, &url, creds, timeout, json),
     }
 }
 
@@ -106,73 +112,111 @@ fn list_entities(
     url: &str,
     creds: Option<PathBuf>,
     timeout: Duration,
+    json: bool,
 ) -> Result<(), Box<dyn ::std::error::Error>> {
     let client = latticeclient::Client::new(url, creds, timeout);
     match entity_type.to_lowercase().trim() {
-        "hosts" => render_hosts(&client),
-        "actors" => render_actors(&client),
-        "bindings" => render_bindings(&client),
-        "capabilities" | "caps" => render_capabilities(&client),
+        "hosts" => render_hosts(&client, json),
+        "actors" => render_actors(&client, json),
+        "bindings" => render_bindings(&client, json),
+        "capabilities" | "caps" => render_capabilities(&client, json),
         _ => Err(
             "Unknown entity type. Valid types are: hosts, actors, capabilities, bindings".into(),
         ),
     }
 }
 
-fn render_actors(client: &latticeclient::Client) -> Result<(), Box<dyn ::std::error::Error>> {
+fn render_actors(
+    client: &latticeclient::Client,
+    json: bool,
+) -> Result<(), Box<dyn ::std::error::Error>> {
     let actors = client.get_actors()?;
-    for (host, actors) in actors {
-        println!("\nHost {}:", host);
-        for actor in actors {
-            let md = actor.metadata.clone().unwrap();
-            println!(
-                "\t{} - {}  v{} ({})",
-                actor.subject,
-                actor.name(),
-                md.ver.unwrap_or("???".into()),
-                md.rev.unwrap_or(0)
-            );
+    if json {
+        println!("{}", serde_json::to_string(&actors)?);
+    } else {
+        for (host, actors) in actors {
+            println!("\nHost {}:", host);
+            for actor in actors {
+                let md = actor.metadata.clone().unwrap();
+                println!(
+                    "\t{} - {}  v{} ({})",
+                    actor.subject,
+                    actor.name(),
+                    md.ver.unwrap_or("???".into()),
+                    md.rev.unwrap_or(0)
+                );
+            }
         }
     }
     Ok(())
 }
 
-fn render_hosts(client: &latticeclient::Client) -> Result<(), Box<dyn ::std::error::Error>> {
+fn render_hosts(
+    client: &latticeclient::Client,
+    json: bool,
+) -> Result<(), Box<dyn ::std::error::Error>> {
     let hosts = client.get_hosts()?;
-    for host in hosts {
-        println!("{}", host);
-    }
-    Ok(())
-}
-
-fn render_capabilities(client: &latticeclient::Client) -> Result<(), Box<dyn ::std::error::Error>> {
-    let caps = client.get_capabilities()?;
-    for (host, caps) in caps {
-        println!("{}", host);
-        for cap in caps {
+    if json {
+        println!("{}", serde_json::to_string(&hosts)?);
+    } else {
+        for host in hosts {
             println!(
-                "\t{},{} - Total Operations {}",
-                cap.descriptor.id,
-                cap.binding_name,
-                cap.descriptor.supported_operations.len()
+                "[{}] Uptime {}s, Labels: {}",
+                host.id,
+                host.uptime_ms / 1000,
+                host.labels
+                    .keys()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             );
         }
     }
     Ok(())
 }
 
-fn render_bindings(client: &latticeclient::Client) -> Result<(), Box<dyn ::std::error::Error>> {
+fn render_capabilities(
+    client: &latticeclient::Client,
+    json: bool,
+) -> Result<(), Box<dyn ::std::error::Error>> {
+    let caps = client.get_capabilities()?;
+    if json {
+        println!("{}", serde_json::to_string(&caps)?);
+    } else {
+        for (host, caps) in caps {
+            println!("{}", host);
+            for cap in caps {
+                println!(
+                    "\t{},{} - Total Operations {}",
+                    cap.descriptor.id,
+                    cap.binding_name,
+                    cap.descriptor.supported_operations.len()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_bindings(
+    client: &latticeclient::Client,
+    json: bool,
+) -> Result<(), Box<dyn ::std::error::Error>> {
     let bindings = client.get_bindings()?;
-    for (host, bindings) in bindings {
-        println!("Host {}", host);
-        for binding in bindings {
-            println!(
-                "\t{} -> {},{} - {} values",
-                binding.actor,
-                binding.capability_id,
-                binding.binding_name,
-                binding.configuration.len()
-            );
+    if json {
+        println!("{}", serde_json::to_string(&bindings)?);
+    } else {
+        for (host, bindings) in bindings {
+            println!("Host {}", host);
+            for binding in bindings {
+                println!(
+                    "\t{} -> {},{} - {} values",
+                    binding.actor,
+                    binding.capability_id,
+                    binding.binding_name,
+                    binding.configuration.len()
+                );
+            }
         }
     }
     Ok(())
