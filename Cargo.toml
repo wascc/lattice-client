@@ -1,6 +1,6 @@
 [package]
 name = "latticeclient"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Kevin Hoffman <alothien@gmail.com>"]
 edition = "2018"
 homepage = "https://wascc.dev"
@@ -21,6 +21,11 @@ wascc-codec = "0.8.0"
 wascap = "0.5.0"
 log = "0.4.11"
 serde_json = "1.0.57"
+chrono = { version = "0.4.15", features = ["serde"]}
+uuid = { version = "0.8.1", features = ["v4"]}
+crossbeam-channel = "0.4.3"
+crossbeam = "0.7.3"
+crossbeam-utils = "^0.7.0"
 
 [[bin]]
 name = "latticectl"

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crossbeam::unbounded;
 use std::{path::PathBuf, time::Duration};
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
@@ -72,6 +73,9 @@ enum CliCommand {
         /// The entity type to list (actors, bindings, capabilities(caps), hosts)
         entity_type: String,
     },
+    #[structopt(name = "watch")]
+    /// Watch events on the lattice
+    Watch,
 }
 
 fn main() {
@@ -104,6 +108,30 @@ fn handle_command(
 ) -> Result<(), Box<dyn ::std::error::Error>> {
     match cmd {
         CliCommand::List { entity_type } => list_entities(&entity_type, &url, creds, timeout, json),
+        CliCommand::Watch => watch_events(&url, creds, timeout, json),
+    }
+}
+
+fn watch_events(
+    url: &str,
+    creds: Option<PathBuf>,
+    timeout: Duration,
+    json: bool,
+) -> Result<(), Box<dyn ::std::error::Error>> {
+    if !json {
+        println!("Watching lattice events, Ctrl+C to abort...");
+    }
+    let client = latticeclient::Client::new(url, creds, timeout);
+    let (s, r) = unbounded();
+    client.watch_events(s)?;
+    loop {
+        let be = r.recv()?;
+        if json {
+            let raw = serde_json::to_string(&be)?;
+            println!("{}", raw);
+        } else {
+            println!("{}", be);
+        }
     }
 }
 

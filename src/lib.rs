@@ -5,11 +5,14 @@
 //! in lattice mode have the ability to automatically form self-healing, self-managing
 //! infrastructure-agnostic clusters called [lattices](https://wascc.dev/docs/lattice/overview/)
 
+mod events;
+
 #[macro_use]
 extern crate serde;
-
 extern crate log;
 
+use crossbeam::Sender;
+pub use events::{BusEvent, CloudEvent, BUS_EVENT_SUBJECT};
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 use wascap::prelude::*;
 
@@ -159,6 +162,22 @@ impl Client {
             }
         }
         Ok(host_caps)
+    }
+
+    /// Watches the lattice for bus events. This will create a subscription in a background thread, so callers
+    /// are responsible for ensuring their process remains alive however long is appropriate. Pass the sender
+    /// half of a channel to receive the events
+    pub fn watch_events(&self, sender: Sender<BusEvent>) -> Result<(), Box<dyn std::error::Error>> {
+        let _sub = self
+            .nc
+            .subscribe("wasmbus.events")?
+            .with_handler(move |msg| {
+                let ce: CloudEvent = serde_json::from_slice(&msg.data).unwrap();
+                let be: BusEvent = serde_json::from_str(&ce.data).unwrap();
+                let _ = sender.send(be);
+                Ok(())
+            });
+        Ok(())
     }
 }
 
