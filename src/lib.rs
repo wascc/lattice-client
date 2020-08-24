@@ -5,21 +5,24 @@
 //! in lattice mode have the ability to automatically form self-healing, self-managing
 //! infrastructure-agnostic clusters called [lattices](https://wascc.dev/docs/lattice/overview/)
 
-mod events;
-
+extern crate log;
 #[macro_use]
 extern crate serde;
-extern crate log;
+
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use crossbeam::Sender;
-pub use events::{BusEvent, CloudEvent, BUS_EVENT_SUBJECT};
-use std::{collections::HashMap, path::PathBuf, time::Duration};
 use wascap::prelude::*;
 
-pub const INVENTORY_ACTORS: &str = "wasmbus.inventory.actors";
-pub const INVENTORY_HOSTS: &str = "wasmbus.inventory.hosts";
-pub const INVENTORY_BINDINGS: &str = "wasmbus.inventory.bindings";
-pub const INVENTORY_CAPABILITIES: &str = "wasmbus.inventory.capabilities";
+pub use events::{BusEvent, CloudEvent};
+
+mod events;
+
+pub const INVENTORY_ACTORS: &str = "inventory.actors";
+pub const INVENTORY_HOSTS: &str = "inventory.hosts";
+pub const INVENTORY_BINDINGS: &str = "inventory.bindings";
+pub const INVENTORY_CAPABILITIES: &str = "inventory.capabilities";
+pub const EVENTS: &str = "events";
 
 /// A response to a lattice probe for inventory. Note that these responses are returned
 /// through regular (non-queue) subscriptions via a scatter-gather like pattern, so the
@@ -77,16 +80,18 @@ pub struct Binding {
 /// A client for interacting with the lattice
 pub struct Client {
     nc: nats::Connection,
+    namespace: Option<String>,
     timeout: Duration,
 }
 
 impl Client {
     /// Creates a new lattice client, connecting to the NATS server at the
     /// given host with an optional set of credentials (JWT auth)
-    pub fn new(host: &str, credsfile: Option<PathBuf>, call_timeout: Duration) -> Self {
+    pub fn new(host: &str, credsfile: Option<PathBuf>, call_timeout: Duration, namespace: Option<String>) -> Self {
         Client {
             nc: get_connection(host, credsfile),
             timeout: call_timeout,
+            namespace,
         }
     }
 
@@ -95,7 +100,7 @@ impl Client {
     /// of hosts.
     pub fn get_hosts(&self) -> std::result::Result<Vec<HostProfile>, Box<dyn std::error::Error>> {
         let mut hosts = vec![];
-        let sub = self.nc.request_multi(INVENTORY_HOSTS, &[])?;
+        let sub = self.nc.request_multi(self.gen_subject(INVENTORY_HOSTS).as_ref(), &[])?;
         for msg in sub.timeout_iter(self.timeout) {
             let ir: InventoryResponse = serde_json::from_slice(&msg.data)?;
             if let InventoryResponse::Host(h) = ir {
@@ -112,7 +117,7 @@ impl Client {
     ) -> std::result::Result<HashMap<String, Vec<Binding>>, Box<dyn std::error::Error>> {
         let mut host_bindings = HashMap::new();
 
-        let sub = self.nc.request_multi(INVENTORY_BINDINGS, &[])?;
+        let sub = self.nc.request_multi(self.gen_subject(INVENTORY_BINDINGS).as_ref(), &[])?;
         for msg in sub.timeout_iter(self.timeout) {
             let ir: InventoryResponse = serde_json::from_slice(&msg.data)?;
             if let InventoryResponse::Bindings { bindings: b, host } = ir {
@@ -132,7 +137,7 @@ impl Client {
     ) -> std::result::Result<HashMap<String, Vec<Claims<Actor>>>, Box<dyn std::error::Error>> {
         let mut host_actors = HashMap::new();
 
-        let sub = self.nc.request_multi(INVENTORY_ACTORS, &[])?;
+        let sub = self.nc.request_multi(self.gen_subject(INVENTORY_ACTORS).as_ref(), &[])?;
         for msg in sub.timeout_iter(self.timeout) {
             let ir: InventoryResponse = serde_json::from_slice(&msg.data)?;
             if let InventoryResponse::Actors { host, actors } = ir {
@@ -151,7 +156,7 @@ impl Client {
     ) -> std::result::Result<HashMap<String, Vec<HostedCapability>>, Box<dyn std::error::Error>>
     {
         let mut host_caps = HashMap::new();
-        let sub = self.nc.request_multi(INVENTORY_CAPABILITIES, &[])?;
+        let sub = self.nc.request_multi(self.gen_subject(INVENTORY_CAPABILITIES).as_ref(), &[])?;
         for msg in sub.timeout_iter(self.timeout) {
             let ir: InventoryResponse = serde_json::from_slice(&msg.data)?;
             if let InventoryResponse::Capabilities { host, capabilities } = ir {
@@ -170,7 +175,7 @@ impl Client {
     pub fn watch_events(&self, sender: Sender<BusEvent>) -> Result<(), Box<dyn std::error::Error>> {
         let _sub = self
             .nc
-            .subscribe("wasmbus.events")?
+            .subscribe(self.gen_subject(EVENTS).as_ref())?
             .with_handler(move |msg| {
                 let ce: CloudEvent = serde_json::from_slice(&msg.data).unwrap();
                 let be: BusEvent = serde_json::from_str(&ce.data).unwrap();
@@ -178,6 +183,13 @@ impl Client {
                 Ok(())
             });
         Ok(())
+    }
+
+    fn gen_subject(&self, subject: &str) -> String {
+        match self.namespace.as_ref() {
+            Some(s) => format!("{}.wasmbus.{}", s, subject),
+            None => format!("wasmbus.{}", subject)
+        }
     }
 }
 
@@ -190,3 +202,4 @@ fn get_connection(host: &str, credsfile: Option<PathBuf>) -> nats::Connection {
     opts = opts.with_name("waSCC Lattice");
     opts.connect(host).unwrap()
 }
+

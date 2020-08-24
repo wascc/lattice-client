@@ -1,8 +1,7 @@
-use chrono::prelude::*;
 use std::fmt;
-use uuid::Uuid;
 
-pub const BUS_EVENT_SUBJECT: &str = "wasmbus.events";
+use chrono::prelude::*;
+use uuid::Uuid;
 
 /// Represents an event that may occur on a bus of connected hosts. Timestamps, identifiers, and
 /// other metadata will be provided by a [CloudEvent](struct.CloudEvent.html) envelope.
@@ -194,7 +193,8 @@ pub struct CloudEvent {
     pub event_type: String,
     #[serde(rename = "typeversion")]
     pub event_type_version: String,
-    pub source: String, // URI
+    pub source: String,
+    // URI
     #[serde(rename = "id")]
     pub event_id: String,
     #[serde(rename = "time")]
