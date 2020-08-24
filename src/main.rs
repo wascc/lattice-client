@@ -1,29 +1,16 @@
-// Copyright 2015-2020 Capital One Services, LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+extern crate latticeclient;
+
+use std::{path::PathBuf, time::Duration};
 
 use crossbeam::unbounded;
-use std::{path::PathBuf, time::Duration};
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 
-extern crate latticeclient;
-
 #[derive(Debug, StructOpt, Clone)]
 #[structopt(
-    global_settings(&[AppSettings::ColoredHelp, AppSettings::VersionlessSubcommands, AppSettings::GlobalVersion]),
-    name = "latticectl",
-    about = "A command line utility for interacting with a waSCC lattice")]
+global_settings(& [AppSettings::ColoredHelp, AppSettings::VersionlessSubcommands, AppSettings::GlobalVersion]),
+name = "latticectl",
+about = "A command line utility for interacting with a waSCC lattice")]
 /// latticectl interacts with a waSCC lattice the same way the waSCC host would, and uses the same
 /// environment variables to connect by default
 struct Cli {
@@ -32,34 +19,42 @@ struct Cli {
 
     /// The host IP of the nearest NATS server/leaf node to connect to the lattice
     #[structopt(
-        short,
-        long,
-        env = "LATTICE_HOST",
-        hide_env_values = true,
-        default_value = "127.0.0.1"
+    short,
+    long,
+    env = "LATTICE_HOST",
+    hide_env_values = true,
+    default_value = "127.0.0.1"
     )]
     url: String,
 
     /// Credentials file used to authenticate against NATS
     #[structopt(
-        short,
-        long,
-        env = "LATTICE_CREDS_FILE",
-        hide_env_values = true,
-        parse(from_os_str)
+    short,
+    long,
+    env = "LATTICE_CREDS_FILE",
+    hide_env_values = true,
+    parse(from_os_str)
     )]
     creds: Option<PathBuf>,
 
     /// Lattice invocation / request timeout period, in milliseconds
     #[structopt(
-        short = "t",
-        long = "timeout",
-        env = "LATTICE_RPC_TIMEOUT_MILLIS",
-        hide_env_values = true,
-        default_value = "600"
+    short = "t",
+    long = "timeout",
+    env = "LATTICE_RPC_TIMEOUT_MILLIS",
+    hide_env_values = true,
+    default_value = "600"
     )]
     call_timeout: u64,
 
+    /// Lattice namespace
+    #[structopt(
+    short = "n",
+    long = "namespace",
+    env = "LATTICE_NAMESPACE",
+    hide_env_values = true,
+    )]
+    namespace: Option<String>,
     /// Render the output in JSON
     #[structopt(short, long)]
     json: bool,
@@ -88,6 +83,7 @@ fn main() {
             args.url,
             args.json,
             args.creds,
+            args.namespace,
             Duration::from_millis(args.call_timeout),
         ) {
             Ok(_) => 0,
@@ -104,11 +100,12 @@ fn handle_command(
     url: String,
     json: bool,
     creds: Option<PathBuf>,
+    namespace: Option<String>,
     timeout: Duration,
 ) -> Result<(), Box<dyn ::std::error::Error>> {
     match cmd {
-        CliCommand::List { entity_type } => list_entities(&entity_type, &url, creds, timeout, json),
-        CliCommand::Watch => watch_events(&url, creds, timeout, json),
+        CliCommand::List { entity_type } => list_entities(&entity_type, &url, creds, timeout, json, namespace),
+        CliCommand::Watch => watch_events(&url, creds, timeout, json, namespace),
     }
 }
 
@@ -117,11 +114,12 @@ fn watch_events(
     creds: Option<PathBuf>,
     timeout: Duration,
     json: bool,
+    namespace: Option<String>,
 ) -> Result<(), Box<dyn ::std::error::Error>> {
     if !json {
         println!("Watching lattice events, Ctrl+C to abort...");
     }
-    let client = latticeclient::Client::new(url, creds, timeout);
+    let client = latticeclient::Client::new(url, creds, timeout, namespace);
     let (s, r) = unbounded();
     client.watch_events(s)?;
     loop {
@@ -141,8 +139,9 @@ fn list_entities(
     creds: Option<PathBuf>,
     timeout: Duration,
     json: bool,
+    namespace: Option<String>,
 ) -> Result<(), Box<dyn ::std::error::Error>> {
-    let client = latticeclient::Client::new(url, creds, timeout);
+    let client = latticeclient::Client::new(url, creds, timeout, namespace);
     match entity_type.to_lowercase().trim() {
         "hosts" => render_hosts(&client, json),
         "actors" => render_actors(&client, json),
