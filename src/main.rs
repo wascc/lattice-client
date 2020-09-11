@@ -1,6 +1,6 @@
 extern crate latticeclient;
-
-use std::{path::PathBuf, time::Duration};
+use std::error::Error;
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use crossbeam::unbounded;
 use structopt::clap::AppSettings;
@@ -19,43 +19,43 @@ struct Cli {
 
     /// The host IP of the nearest NATS server/leaf node to connect to the lattice
     #[structopt(
-    short,
-    long,
-    env = "LATTICE_HOST",
-    hide_env_values = true,
-    default_value = "127.0.0.1"
+        short,
+        long,
+        env = "LATTICE_HOST",
+        hide_env_values = true,
+        default_value = "127.0.0.1"
     )]
     url: String,
 
     /// Credentials file used to authenticate against NATS
     #[structopt(
-    short,
-    long,
-    env = "LATTICE_CREDS_FILE",
-    hide_env_values = true,
-    parse(from_os_str)
+        short,
+        long,
+        env = "LATTICE_CREDS_FILE",
+        hide_env_values = true,
+        parse(from_os_str)
     )]
     creds: Option<PathBuf>,
 
     /// Lattice invocation / request timeout period, in milliseconds
     #[structopt(
-    short = "t",
-    long = "timeout",
-    env = "LATTICE_RPC_TIMEOUT_MILLIS",
-    hide_env_values = true,
-    default_value = "600"
+        short = "t",
+        long = "timeout",
+        env = "LATTICE_RPC_TIMEOUT_MILLIS",
+        hide_env_values = true,
+        default_value = "600"
     )]
     call_timeout: u64,
 
     /// Lattice namespace
     #[structopt(
-    short = "n",
-    long = "namespace",
-    env = "LATTICE_NAMESPACE",
-    hide_env_values = true,
+        short = "n",
+        long = "namespace",
+        env = "LATTICE_NAMESPACE",
+        hide_env_values = true
     )]
     namespace: Option<String>,
-    /// Render the output in JSON
+    /// Render the output in JSON (if the command supports it)
     #[structopt(short, long)]
     json: bool,
 }
@@ -71,6 +71,20 @@ enum CliCommand {
     #[structopt(name = "watch")]
     /// Watch events on the lattice
     Watch,
+    #[structopt(name = "start")]
+    /// Hold a lattice auction for a given actor and start it if a suitable host is found
+    Start {
+        /// The public key (subject) of the actor to launch. Must reside in a connected Gantry
+        actor: String,
+        /// The revision of this actor to launch. While you can use '0' to automatically select the newest revision, this is not advisable in production environments
+        revision: u32,
+        /// Add limiting constraints to filter potential target hosts (in the form of label=value)
+        #[structopt(short = "c", parse(try_from_str = parse_key_val), number_of_values = 1)]
+        constraint: Vec<(String, String)>,
+    },
+    /// Tell a given host to terminate the given actor
+    #[structopt(name = "stop")]
+    Stop { actor: String, host_id: String },
 }
 
 fn main() {
@@ -104,9 +118,68 @@ fn handle_command(
     timeout: Duration,
 ) -> Result<(), Box<dyn ::std::error::Error>> {
     match cmd {
-        CliCommand::List { entity_type } => list_entities(&entity_type, &url, creds, timeout, json, namespace),
+        CliCommand::List { entity_type } => {
+            list_entities(&entity_type, &url, creds, timeout, json, namespace)
+        }
         CliCommand::Watch => watch_events(&url, creds, timeout, json, namespace),
+        CliCommand::Start {
+            actor,
+            constraint,
+            revision,
+        } => start_actor(
+            &url, creds, timeout, json, namespace, actor, constraint, revision,
+        ),
+        CliCommand::Stop { actor, host_id } => {
+            stop_actor(&url, creds, timeout, json, namespace, actor, host_id)
+        }
     }
+}
+
+fn start_actor(
+    url: &str,
+    creds: Option<PathBuf>,
+    timeout: Duration,
+    json: bool,
+    namespace: Option<String>,
+    actor: String,
+    constraints: Vec<(String, String)>,
+    revision: u32,
+) -> Result<(), Box<dyn ::std::error::Error>> {
+    let client = latticeclient::Client::new(url, creds, timeout, namespace);
+    let candidates =
+        client.perform_launch_auction(&actor, revision, constraints_to_hashmap(constraints))?;
+    if candidates.len() > 0 {
+        let ack = client.launch_actor_on_host(&actor, revision, &candidates[0].host_id)?;
+        if ack.actor_id != actor || ack.host != candidates[0].host_id {
+            return Err(format!("Received unexpected acknowledgement: {:?}", ack).into());
+        }
+        if json {
+            println!("{}", serde_json::to_string(&ack)?);
+        } else {
+            println!(
+                "Host {} acknowledged request to launch actor {} rev {}.",
+                ack.host, ack.actor_id, revision
+            );
+        }
+    } else {
+        println!("Did not receive a response to the actor schedule auction.");
+    }
+    Ok(())
+}
+
+fn stop_actor(
+    url: &str,
+    creds: Option<PathBuf>,
+    timeout: Duration,
+    _json: bool,
+    namespace: Option<String>,
+    actor: String,
+    host_id: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = latticeclient::Client::new(url, creds, timeout, namespace);
+    client.stop_actor_on_host(&actor, &host_id)?;
+    println!("Termination command sent.");
+    Ok(())
 }
 
 fn watch_events(
@@ -247,4 +320,26 @@ fn render_bindings(
         }
     }
     Ok(())
+}
+
+/// Parse a single key-value pair
+fn parse_key_val<T, U>(s: &str) -> Result<(T, U), Box<dyn Error>>
+where
+    T: std::str::FromStr,
+    T::Err: Error + 'static,
+    U: std::str::FromStr,
+    U::Err: Error + 'static,
+{
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{}`", s))?;
+    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
+
+fn constraints_to_hashmap(input: Vec<(String, String)>) -> HashMap<String, String> {
+    let mut hm = HashMap::new();
+    for (k, v) in input {
+        hm.insert(k.to_owned(), v.to_owned());
+    }
+    hm
 }

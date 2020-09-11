@@ -11,11 +11,15 @@ extern crate serde;
 
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
+use controlplane::{
+    LaunchAck, LaunchAuctionRequest, LaunchAuctionResponse, LaunchCommand, TerminateCommand,
+};
 use crossbeam::Sender;
 use wascap::prelude::*;
 
 pub use events::{BusEvent, CloudEvent};
 
+pub mod controlplane;
 mod events;
 
 pub const INVENTORY_ACTORS: &str = "inventory.actors";
@@ -23,6 +27,7 @@ pub const INVENTORY_HOSTS: &str = "inventory.hosts";
 pub const INVENTORY_BINDINGS: &str = "inventory.bindings";
 pub const INVENTORY_CAPABILITIES: &str = "inventory.capabilities";
 pub const EVENTS: &str = "events";
+const AUCTION_TIMEOUT_SECONDS: u64 = 5;
 
 /// A response to a lattice probe for inventory. Note that these responses are returned
 /// through regular (non-queue) subscriptions via a scatter-gather like pattern, so the
@@ -87,7 +92,12 @@ pub struct Client {
 impl Client {
     /// Creates a new lattice client, connecting to the NATS server at the
     /// given host with an optional set of credentials (JWT auth)
-    pub fn new(host: &str, credsfile: Option<PathBuf>, call_timeout: Duration, namespace: Option<String>) -> Self {
+    pub fn new(
+        host: &str,
+        credsfile: Option<PathBuf>,
+        call_timeout: Duration,
+        namespace: Option<String>,
+    ) -> Self {
         Client {
             nc: get_connection(host, credsfile),
             timeout: call_timeout,
@@ -100,7 +110,9 @@ impl Client {
     /// of hosts.
     pub fn get_hosts(&self) -> std::result::Result<Vec<HostProfile>, Box<dyn std::error::Error>> {
         let mut hosts = vec![];
-        let sub = self.nc.request_multi(self.gen_subject(INVENTORY_HOSTS).as_ref(), &[])?;
+        let sub = self
+            .nc
+            .request_multi(self.gen_subject(INVENTORY_HOSTS).as_ref(), &[])?;
         for msg in sub.timeout_iter(self.timeout) {
             let ir: InventoryResponse = serde_json::from_slice(&msg.data)?;
             if let InventoryResponse::Host(h) = ir {
@@ -117,7 +129,9 @@ impl Client {
     ) -> std::result::Result<HashMap<String, Vec<Binding>>, Box<dyn std::error::Error>> {
         let mut host_bindings = HashMap::new();
 
-        let sub = self.nc.request_multi(self.gen_subject(INVENTORY_BINDINGS).as_ref(), &[])?;
+        let sub = self
+            .nc
+            .request_multi(self.gen_subject(INVENTORY_BINDINGS).as_ref(), &[])?;
         for msg in sub.timeout_iter(self.timeout) {
             let ir: InventoryResponse = serde_json::from_slice(&msg.data)?;
             if let InventoryResponse::Bindings { bindings: b, host } = ir {
@@ -137,7 +151,9 @@ impl Client {
     ) -> std::result::Result<HashMap<String, Vec<Claims<Actor>>>, Box<dyn std::error::Error>> {
         let mut host_actors = HashMap::new();
 
-        let sub = self.nc.request_multi(self.gen_subject(INVENTORY_ACTORS).as_ref(), &[])?;
+        let sub = self
+            .nc
+            .request_multi(self.gen_subject(INVENTORY_ACTORS).as_ref(), &[])?;
         for msg in sub.timeout_iter(self.timeout) {
             let ir: InventoryResponse = serde_json::from_slice(&msg.data)?;
             if let InventoryResponse::Actors { host, actors } = ir {
@@ -156,7 +172,9 @@ impl Client {
     ) -> std::result::Result<HashMap<String, Vec<HostedCapability>>, Box<dyn std::error::Error>>
     {
         let mut host_caps = HashMap::new();
-        let sub = self.nc.request_multi(self.gen_subject(INVENTORY_CAPABILITIES).as_ref(), &[])?;
+        let sub = self
+            .nc
+            .request_multi(self.gen_subject(INVENTORY_CAPABILITIES).as_ref(), &[])?;
         for msg in sub.timeout_iter(self.timeout) {
             let ir: InventoryResponse = serde_json::from_slice(&msg.data)?;
             if let InventoryResponse::Capabilities { host, capabilities } = ir {
@@ -185,10 +203,84 @@ impl Client {
         Ok(())
     }
 
+    /// Performs an auction among all hosts on the lattice, requesting that the given actor be launched (loaded+started)
+    /// on a suitable host as described by the set of constraints. Only hosts that believe they can launch the actor
+    /// will reply. In other words, there will be no negative responses in the result vector, only a list of suitable
+    /// hosts.
+    pub fn perform_launch_auction(
+        &self,
+        actor_id: &str,
+        revision: u32,
+        constraints: HashMap<String, String>,
+    ) -> Result<Vec<LaunchAuctionResponse>, Box<dyn std::error::Error>> {
+        let mut results = vec![];
+        let req = LaunchAuctionRequest::new(actor_id, revision, constraints);
+        let sub = self.nc.request_multi(
+            self.gen_subject(&format!(
+                "{}.{}",
+                controlplane::CPLANE_PREFIX,
+                controlplane::AUCTION_REQ
+            ))
+            .as_ref(),
+            &serde_json::to_vec(&req)?,
+        )?;
+        for msg in sub.timeout_iter(self.timeout) {
+            let resp: LaunchAuctionResponse = serde_json::from_slice(&msg.data)?;
+            results.push(resp);
+        }
+        Ok(results)
+    }
+
+    /// After collecting the results of a launch auction, a "winner" from among the hosts can be selected and
+    /// told to launch a given actor. Note that the actor's bytes must reside in a connected Gantry instance, and
+    /// this function does _not_ confirm successful launch, only that the target host acknowledged the request
+    /// to launch.
+    pub fn launch_actor_on_host(
+        &self,
+        actor_id: &str,
+        revision: u32,
+        host_id: &str,
+    ) -> Result<LaunchAck, Box<dyn std::error::Error>> {
+        let msg = LaunchCommand {
+            actor_id: actor_id.to_string(),
+            revision,
+        };
+        let ack: LaunchAck = serde_json::from_slice(
+            &self
+                .nc
+                .request_timeout(
+                    &self.gen_launch_actor_subject(host_id),
+                    &serde_json::to_vec(&msg)?,
+                    Duration::from_secs(AUCTION_TIMEOUT_SECONDS),
+                )?
+                .data,
+        )?;
+        Ok(ack)
+    }
+
+    /// Sends a command to the specified host telling it to terminate an actor. The success of this command indicates
+    /// a successful publication, and not necessarily a successful remote actor termination. Monitor the lattice
+    /// events to see if the actor was successfully terminated
+    pub fn stop_actor_on_host(
+        &self,
+        actor_id: &str,
+        host_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let msg = TerminateCommand {
+            actor_id: actor_id.to_string(),
+        };
+        self.nc.publish(
+            &self.gen_terminate_actor_subject(host_id),
+            &serde_json::to_vec(&msg)?,
+        )?;
+        let _ = self.nc.flush();
+        Ok(())
+    }
+
     fn gen_subject(&self, subject: &str) -> String {
         match self.namespace.as_ref() {
             Some(s) => format!("{}.wasmbus.{}", s, subject),
-            None => format!("wasmbus.{}", subject)
+            None => format!("wasmbus.{}", subject),
         }
     }
 }
@@ -202,4 +294,3 @@ fn get_connection(host: &str, credsfile: Option<PathBuf>) -> nats::Connection {
     opts = opts.with_name("waSCC Lattice");
     opts.connect(host).unwrap()
 }
-
