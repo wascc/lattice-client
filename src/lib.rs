@@ -105,6 +105,18 @@ impl Client {
         }
     }
 
+    pub fn with_connection(
+        nc: nats::Connection,
+        call_timeout: Duration,
+        namespace: Option<String>,
+    ) -> Self {
+        Client {
+            nc,
+            timeout: call_timeout,
+            namespace,
+        }
+    }
+
     /// Retrieves the list of all hosts running within the lattice. If it takes a host longer
     /// than the call timeout period to reply to the probe, it will not be included in the list
     /// of hosts.
