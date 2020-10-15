@@ -11,13 +11,17 @@ extern crate serde;
 
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
-use controlplane::{
-    LaunchAck, LaunchAuctionRequest, LaunchAuctionResponse, LaunchCommand, TerminateCommand,
-};
 use crossbeam::Sender;
 use wascap::prelude::*;
 
+use controlplane::{
+    LaunchAck, LaunchAuctionRequest, LaunchAuctionResponse, LaunchCommand, TerminateCommand,
+};
 pub use events::{BusEvent, CloudEvent};
+
+use crate::controlplane::{
+    LaunchProviderCommand, ProviderAuctionRequest, ProviderAuctionResponse, ProviderLaunchAck,
+};
 
 pub mod controlplane;
 mod events;
@@ -218,15 +222,14 @@ impl Client {
     /// Performs an auction among all hosts on the lattice, requesting that the given actor be launched (loaded+started)
     /// on a suitable host as described by the set of constraints. Only hosts that believe they can launch the actor
     /// will reply. In other words, there will be no negative responses in the result vector, only a list of suitable
-    /// hosts.
-    pub fn perform_launch_auction(
+    /// hosts. The actor to be launched is identified by an OCI registry reference
+    pub fn perform_actor_launch_auction(
         &self,
         actor_id: &str,
-        revision: u32,
         constraints: HashMap<String, String>,
     ) -> Result<Vec<LaunchAuctionResponse>, Box<dyn std::error::Error>> {
         let mut results = vec![];
-        let req = LaunchAuctionRequest::new(actor_id, revision, constraints);
+        let req = LaunchAuctionRequest::new(actor_id, constraints);
         let sub = self.nc.request_multi(
             self.gen_subject(&format!(
                 "{}.{}",
@@ -236,26 +239,78 @@ impl Client {
             .as_ref(),
             &serde_json::to_vec(&req)?,
         )?;
-        for msg in sub.timeout_iter(self.timeout) {
+        for msg in sub.timeout_iter(Duration::from_secs(AUCTION_TIMEOUT_SECONDS)) {
             let resp: LaunchAuctionResponse = serde_json::from_slice(&msg.data)?;
             results.push(resp);
         }
         Ok(results)
     }
 
+    /// Performs an auction among all hosts on the lattice, requesting that the given capability provider
+    /// (indicated by OCI image reference) be loaded/started. Hosts that believe they can host the
+    /// provider given the constraints will respond to the auction
+    pub fn perform_provider_launch_auction(
+        &self,
+        provider_ref: &str,
+        binding_name: &str,
+        constraints: HashMap<String, String>,
+    ) -> Result<Vec<ProviderAuctionResponse>, Box<dyn std::error::Error>> {
+        let mut results = vec![];
+        let req = ProviderAuctionRequest::new(provider_ref, binding_name, constraints);
+        let sub = self.nc.request_multi(
+            self.gen_subject(&format!(
+                "{}.{}",
+                controlplane::CPLANE_PREFIX,
+                controlplane::PROVIDER_AUCTION_REQ
+            ))
+            .as_ref(),
+            &serde_json::to_vec(&req)?,
+        )?;
+        for msg in sub.timeout_iter(Duration::from_secs(AUCTION_TIMEOUT_SECONDS)) {
+            let resp: ProviderAuctionResponse = serde_json::from_slice(&msg.data)?;
+            results.push(resp);
+        }
+        Ok(results)
+    }
+
+    /// After collecting the results of a provider launch auction, a "winner" from among the hosts
+    /// can be selected and told to launch the given provider. The provider's bytes will be retrieved
+    /// from the OCI registry. This function does _not_ confirm successful launch, only receipt
+    /// of the launch request.
+    pub fn launch_provider_on_host(
+        &self,
+        provider_ref: &str,
+        host_id: &str,
+        binding_name: &str,
+    ) -> Result<ProviderLaunchAck, Box<dyn std::error::Error>> {
+        let msg = LaunchProviderCommand {
+            provider_ref: provider_ref.to_string(),
+            binding_name: binding_name.to_string(),
+        };
+        let ack: ProviderLaunchAck = serde_json::from_slice(
+            &self
+                .nc
+                .request_timeout(
+                    &self.gen_launch_provider_subject(host_id),
+                    &serde_json::to_vec(&msg)?,
+                    self.timeout,
+                )?
+                .data,
+        )?;
+        Ok(ack)
+    }
+
     /// After collecting the results of a launch auction, a "winner" from among the hosts can be selected and
-    /// told to launch a given actor. Note that the actor's bytes must reside in a connected Gantry instance, and
-    /// this function does _not_ confirm successful launch, only that the target host acknowledged the request
+    /// told to launch a given actor. Note that the actor's bytes will be retrieved from the OCI registry.
+    /// This function does _not_ confirm successful launch, only that the target host acknowledged the request
     /// to launch.
     pub fn launch_actor_on_host(
         &self,
         actor_id: &str,
-        revision: u32,
         host_id: &str,
     ) -> Result<LaunchAck, Box<dyn std::error::Error>> {
         let msg = LaunchCommand {
             actor_id: actor_id.to_string(),
-            revision,
         };
         let ack: LaunchAck = serde_json::from_slice(
             &self
@@ -263,7 +318,7 @@ impl Client {
                 .request_timeout(
                     &self.gen_launch_actor_subject(host_id),
                     &serde_json::to_vec(&msg)?,
-                    Duration::from_secs(AUCTION_TIMEOUT_SECONDS),
+                    self.timeout,
                 )?
                 .data,
         )?;

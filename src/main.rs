@@ -1,4 +1,5 @@
 extern crate latticeclient;
+
 use std::error::Error;
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
@@ -74,10 +75,8 @@ enum CliCommand {
     #[structopt(name = "start")]
     /// Hold a lattice auction for a given actor and start it if a suitable host is found
     Start {
-        /// The public key (subject) of the actor to launch. Must reside in a connected Gantry
-        actor: String,
-        /// The revision of this actor to launch. While you can use '0' to automatically select the newest revision, this is not advisable in production environments
-        revision: u32,
+        /// An OCI image reference of the actor to be launched
+        actor_ref: String,
         /// Add limiting constraints to filter potential target hosts (in the form of label=value)
         #[structopt(short = "c", parse(try_from_str = parse_key_val), number_of_values = 1)]
         constraint: Vec<(String, String)>,
@@ -123,12 +122,9 @@ fn handle_command(
         }
         CliCommand::Watch => watch_events(&url, creds, timeout, json, namespace),
         CliCommand::Start {
-            actor,
+            actor_ref,
             constraint,
-            revision,
-        } => start_actor(
-            &url, creds, timeout, json, namespace, actor, constraint, revision,
-        ),
+        } => start_actor(&url, creds, timeout, json, namespace, actor_ref, constraint),
         CliCommand::Stop { actor, host_id } => {
             stop_actor(&url, creds, timeout, json, namespace, actor, host_id)
         }
@@ -143,13 +139,12 @@ fn start_actor(
     namespace: Option<String>,
     actor: String,
     constraints: Vec<(String, String)>,
-    revision: u32,
 ) -> Result<(), Box<dyn ::std::error::Error>> {
     let client = latticeclient::Client::new(url, creds, timeout, namespace);
     let candidates =
-        client.perform_launch_auction(&actor, revision, constraints_to_hashmap(constraints))?;
+        client.perform_actor_launch_auction(&actor, constraints_to_hashmap(constraints))?;
     if candidates.len() > 0 {
-        let ack = client.launch_actor_on_host(&actor, revision, &candidates[0].host_id)?;
+        let ack = client.launch_actor_on_host(&actor, &candidates[0].host_id)?;
         if ack.actor_id != actor || ack.host != candidates[0].host_id {
             return Err(format!("Received unexpected acknowledgement: {:?}", ack).into());
         }
@@ -157,8 +152,8 @@ fn start_actor(
             println!("{}", serde_json::to_string(&ack)?);
         } else {
             println!(
-                "Host {} acknowledged request to launch actor {} rev {}.",
-                ack.host, ack.actor_id, revision
+                "Host {} acknowledged request to launch actor {}.",
+                ack.host, ack.actor_id
             );
         }
     } else {
