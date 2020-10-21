@@ -15,7 +15,7 @@ categories = ["wasm", "api-bindings", "command-line-utilities"]
 
 [dependencies]
 structopt = "0.3.16"
-nats = { git = "https://github.com/autodidaddict/nats.rs" }
+nats = "0.8.1"
 serde = { version = "1.0.115", features = ["derive"] }
 wascc-codec = "0.8.0"
 wascap = "0.5.1"
